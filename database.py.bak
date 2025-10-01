@@ -1,0 +1,244 @@
+import os
+import sqlite3
+from contextlib import contextmanager
+import json
+
+DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'rpc_database.sqlite')
+
+def dict_factory(cursor, row):
+    d = {}
+    for idx, col in enumerate(cursor.description):
+        d[col[0]] = row[idx]
+    return d
+
+import os
+import sqlite3
+from contextlib import contextmanager
+import json
+
+DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'rpc_database.sqlite')
+
+def dict_factory(cursor, row):
+    d = {}
+    for idx, col in enumerate(cursor.description):
+        d[col[0]] = row[idx]
+    return d
+
+def init_database():
+    """Initialize database tables"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = dict_factory
+    cur = conn.cursor()
+
+    # Enable foreign key support
+    cur.execute("PRAGMA foreign_keys = ON")
+
+    # Users table
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            username TEXT,
+            discriminator TEXT,
+            avatar TEXT,
+            email TEXT,
+            access_token TEXT,
+            refresh_token TEXT,
+            token_expiry TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            last_login TEXT DEFAULT CURRENT_TIMESTAMP,
+            api_key TEXT UNIQUE
+        )
+    ''')
+
+    # Add api_key column if it doesn't exist
+    cur.execute('''
+        ALTER TABLE users 
+        ADD COLUMN IF NOT EXISTS api_key VARCHAR(255) UNIQUE
+    ''')
+
+    # Custom RPCs table
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS custom_rpcs (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER,
+            app_id TEXT NOT NULL,
+            rpc_type TEXT DEFAULT 'Playing',
+            details TEXT,
+            state TEXT,
+            timestamp_type TEXT DEFAULT 'live',
+            custom_timestamp INTEGER,
+            large_image_url TEXT,
+            large_image_text TEXT,
+            small_image_url TEXT,
+            small_image_text TEXT,
+            buttons TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    ''')
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    print("Database initialized successfully!")
+
+@contextmanager
+def get_db():
+    """Context manager for database connections"""
+    conn = psycopg2.connect(DATABASE_URL)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+def get_user(user_id):
+    """Get user by ID"""
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute('SELECT * FROM users WHERE id = %s', (user_id,))
+        user = cur.fetchone()
+        cur.close()
+        return user
+
+def create_or_update_user(user_data, tokens):
+    """Create or update user in database"""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT INTO users (id, username, discriminator, avatar, email, access_token, refresh_token, last_login)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (id) DO UPDATE SET
+                username = EXCLUDED.username,
+                discriminator = EXCLUDED.discriminator,
+                avatar = EXCLUDED.avatar,
+                email = EXCLUDED.email,
+                access_token = EXCLUDED.access_token,
+                refresh_token = EXCLUDED.refresh_token,
+                last_login = CURRENT_TIMESTAMP
+        ''', (
+            user_data['id'],
+            user_data.get('username', ''),
+            user_data.get('discriminator', '0'),
+            user_data.get('avatar', ''),
+            user_data.get('email', ''),
+            tokens.get('access_token', ''),
+            tokens.get('refresh_token', '')
+        ))
+        conn.commit()
+        cur.close()
+
+def get_all_users():
+    """Get all users from database"""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute('SELECT * FROM users ORDER BY last_login DESC')
+        users = cur.fetchall()
+        cur.close()
+        return users
+
+def create_custom_rpc(user_id, rpc_data):
+    """Create a custom RPC for user"""
+    with get_db() as conn:
+        cur = conn.cursor()
+        buttons_json = json.dumps(rpc_data.get('buttons', [])) if rpc_data.get('buttons') else None
+        cur.execute('''
+            INSERT INTO custom_rpcs (
+                user_id, app_id, rpc_type, details, state, timestamp_type,
+                custom_timestamp, large_image_url, large_image_text,
+                small_image_url, small_image_text, buttons
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            user_id,
+            rpc_data.get('app_id'),
+            rpc_data.get('rpc_type', 'Playing'),
+            rpc_data.get('details'),
+            rpc_data.get('state'),
+            rpc_data.get('timestamp_type', 'live'),
+            rpc_data.get('custom_timestamp'),
+            rpc_data.get('large_image_url'),
+            rpc_data.get('large_image_text'),
+            rpc_data.get('small_image_url'),
+            rpc_data.get('small_image_text'),
+            buttons_json
+        ))
+        rpc_id = cur.lastrowid
+        conn.commit()
+        cur.close()
+        return rpc_id
+
+def get_user_rpcs(user_id):
+    """Get all RPCs for a user"""
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute('''
+            SELECT * FROM custom_rpcs 
+            WHERE user_id = %s AND is_active = TRUE 
+            ORDER BY created_at DESC
+        ''', (user_id,))
+        rpcs = cur.fetchall()
+        cur.close()
+        return rpcs
+
+def delete_custom_rpc(rpc_id, user_id):
+    """Delete a custom RPC"""
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute('''
+        DELETE FROM custom_rpcs 
+        WHERE id = %s AND user_id = %s AND is_active = TRUE
+    ''', (rpc_id, user_id))
+
+    conn.commit()
+    cur.close()
+
+def get_rpc_by_id(rpc_id, user_id):
+    """Get a specific RPC by ID"""
+    conn = get_db()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    cur.execute('''
+        SELECT * FROM custom_rpcs 
+        WHERE id = %s AND user_id = %s AND is_active = TRUE
+    ''', (rpc_id, user_id))
+
+    rpc = cur.fetchone()
+    cur.close()
+
+    return dict(rpc) if rpc else None
+
+
+def update_user_tokens(user_id, access_token, refresh_token):
+    """Update user tokens"""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            UPDATE users SET access_token = %s, refresh_token = %s, last_login = CURRENT_TIMESTAMP
+            WHERE id = %s
+        ''', (access_token, refresh_token, user_id))
+        conn.commit()
+        cur.close()
+
+def generate_api_key(user_id):
+    """Generate an API key for user"""
+    import secrets
+    api_key = secrets.token_urlsafe(32)
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute('''
+            UPDATE users SET api_key = %s WHERE id = %s
+        ''', (api_key, user_id))
+        conn.commit()
+        cur.close()
+    return api_key
+
+def verify_api_key(api_key):
+    """Verify API key and return user ID"""
+    with get_db() as conn:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute('SELECT id FROM users WHERE api_key = %s', (api_key,))
+        result = cur.fetchone()
+        cur.close()
+        return result['id'] if result else None
